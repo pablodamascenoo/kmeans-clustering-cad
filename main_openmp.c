@@ -19,6 +19,17 @@ typedef struct
   double y;
 } Centroide;
 
+#pragma omp begin declare target
+static inline unsigned int rand_device(unsigned int *seed)
+{
+  unsigned long long z = (unsigned long long)(*seed) + 0x9e3779b97f4a7c15ULL;
+  *seed = (unsigned int)z;
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+  return (unsigned int)((z ^ (z >> 31)) >> 32);
+}
+#pragma omp end declare target
+
 void inicializar_centroides(Centroide *centroides, int num_clusters, Ponto *pontos, int num_pontos)
 {
   int *escolhidos = malloc(num_clusters * sizeof(int));
@@ -49,14 +60,34 @@ void inicializar_centroides(Centroide *centroides, int num_clusters, Ponto *pont
   free(escolhidos);
 }
 
-int calcular_distancia_e_atribuir_clusters(Centroide *centroides, int num_clusters, Ponto *pontos, int num_pontos)
+void atualizar_centroides(Centroide *centroides, int num_clusters, Ponto *pontos, int num_pontos, double *soma_x, double *soma_y, int *count)
+{
+  #pragma omp target teams distribute parallel for
+  for (int j = 0; j < num_clusters; j++)
+  {
+    if (count[j] > 0)
+    {
+      centroides[j].x = soma_x[j] / count[j];
+      centroides[j].y = soma_y[j] / count[j];
+    }
+    else
+    {
+      unsigned int seed = (unsigned int)j + 1u;
+      int random_index = (int)(rand_device(&seed) % (unsigned int)num_pontos);
+      centroides[j].x = pontos[random_index].x;
+      centroides[j].y = pontos[random_index].y;
+    }
+  }
+}
+
+int calcular_distancia_e_atribuir_clusters(Centroide *centroides, int num_clusters, Ponto *pontos, int num_pontos, double *soma_x, double *soma_y, int *count)
 {
   int mudancas = 0;
 
+
   #pragma omp target teams distribute parallel for \
-    map(tofrom: pontos[0:num_pontos], mudancas) \
-    map(to: centroides[0:num_clusters]) \
-    reduction(+:mudancas)
+    map(tofrom: mudancas) \
+    reduction(+:mudancas, soma_x[0:num_clusters], soma_y[0:num_clusters], count[0:num_clusters])
   for (int i = 0; i < num_pontos; i++)
   {
     double min_distancia = DBL_MAX;
@@ -80,19 +111,7 @@ int calcular_distancia_e_atribuir_clusters(Centroide *centroides, int num_cluste
       mudancas++;
       pontos[i].cluster_id = cluster_id;
     }
-  }
 
-  return mudancas;
-}
-
-void atualizar_centroides(Centroide *centroides, int num_clusters, Ponto *pontos, int num_pontos)
-{
-  double *soma_x = calloc(num_clusters, sizeof(double));
-  double *soma_y = calloc(num_clusters, sizeof(double));
-  int *count = calloc(num_clusters, sizeof(int));
-
-  for (int i = 0; i < num_pontos; i++)
-  {
     int id = pontos[i].cluster_id;
     if (id >= 0 && id < num_clusters)
     {
@@ -102,24 +121,9 @@ void atualizar_centroides(Centroide *centroides, int num_clusters, Ponto *pontos
     }
   }
 
-  for (int j = 0; j < num_clusters; j++)
-  {
-    if (count[j] > 0)
-    {
-      centroides[j].x = soma_x[j] / count[j];
-      centroides[j].y = soma_y[j] / count[j];
-    }
-    else
-    {
-      int random_index = rand() % num_pontos;
-      centroides[j].x = pontos[random_index].x;
-      centroides[j].y = pontos[random_index].y;
-    }
-  }
+  atualizar_centroides(centroides, num_clusters, pontos, num_pontos, soma_x, soma_y, count);
 
-  free(soma_x);
-  free(soma_y);
-  free(count);
+  return mudancas;
 }
 
 double calcular_wcss(Centroide *centroides, int num_clusters, Ponto *pontos, int num_pontos)
@@ -149,16 +153,47 @@ int executar_kmeans(Centroide *centroides, int num_clusters, Ponto *pontos, int 
 
   inicializar_centroides(centroides, num_clusters, pontos, num_pontos);
 
+  double *soma_x = calloc(num_clusters, sizeof(double));
+  double *soma_y = calloc(num_clusters, sizeof(double));
+  int *count = calloc(num_clusters, sizeof(int));
+
+  #pragma omp target enter data map(alloc: soma_x[0:num_clusters], soma_y[0:num_clusters], count[0:num_clusters])
+
   int iteracao;
-  for (iteracao = 0; iteracao < max_iteracoes; iteracao++)
+  #pragma omp target data \
+    map(tofrom: pontos[0:num_pontos], centroides[0:num_clusters])
   {
-    int mudancas = calcular_distancia_e_atribuir_clusters(centroides, num_clusters, pontos, num_pontos);
-    if (mudancas == 0)
+    for (iteracao = 0; iteracao < max_iteracoes; iteracao++)
     {
-      break;
+      #pragma omp target teams distribute parallel for
+      for (int j = 0; j < num_clusters; j++)
+      {
+        soma_x[j] = 0.0;
+        soma_y[j] = 0.0;
+        count[j] = 0;
+      }
+
+      int mudancas = calcular_distancia_e_atribuir_clusters(
+          centroides,
+          num_clusters,
+          pontos,
+          num_pontos,
+          soma_x,
+          soma_y,
+          count
+        );
+      if (mudancas == 0)
+      {
+        break;
+      }
     }
-    atualizar_centroides(centroides, num_clusters, pontos, num_pontos);
   }
+
+  #pragma omp target exit data map(delete: soma_x[0:num_clusters], soma_y[0:num_clusters], count[0:num_clusters])
+
+  free(soma_x);
+  free(soma_y);
+  free(count);
 
   return iteracao;
 }
