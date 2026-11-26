@@ -312,6 +312,14 @@ int main(int argc, char *argv[])
 
   int size = 1024;
   Ponto *pontos = malloc(size * sizeof(Ponto));
+  if (pontos == NULL)
+  {
+    fprintf(stderr, "Erro: sem memoria para alocar o vetor inicial de pontos.\n");
+    free(linha);
+    fclose(arquivo_entrada);
+    return EXIT_FAILURE;
+  }
+
   int num_pontos = 0;
   int linhas_descartadas = 0;
 
@@ -322,7 +330,17 @@ int main(int argc, char *argv[])
     if (num_pontos >= size)
     {
       size *= 2;
-      pontos = realloc(pontos, size * sizeof(Ponto));
+      // Usa um ponteiro temporario para nao perder o endereco antigo se o realloc falhar
+      Ponto *temp = realloc(pontos, size * sizeof(Ponto));
+      if (temp == NULL)
+      {
+        fprintf(stderr, "Erro: sem memoria ao expandir o vetor de pontos (%d elementos).\n", size);
+        free(pontos);
+        free(linha);
+        fclose(arquivo_entrada);
+        return EXIT_FAILURE;
+      }
+      pontos = temp;
     }
 
     linha[strcspn(linha, "\r\n")] = '\0';
@@ -390,12 +408,40 @@ int main(int argc, char *argv[])
 
   // Executa o K-means definitivo
   Centroide *centroides = malloc(num_clusters * sizeof(Centroide));
+  if (centroides == NULL)
+  {
+    fprintf(stderr, "Erro: sem memoria para alocar os centroides.\n");
+    free(linha);
+    free(pontos);
+    fclose(arquivo_entrada);
+    return EXIT_FAILURE;
+  }
+
   clock_t inicio_kmeans = clock();
 
   int iteracoes_finais = executar_kmeans(centroides, num_clusters, pontos, num_pontos, 100);
   double tempo_kmeans = (double)(clock() - inicio_kmeans) / CLOCKS_PER_SEC;
 
   int *contagem_clusters = calloc(num_clusters, sizeof(int));
+  if (contagem_clusters == NULL)
+  {
+    fprintf(stderr, "Erro: sem memoria para contar pontos por cluster.\n");
+    free(centroides);
+    free(linha);
+    free(pontos);
+    fclose(arquivo_entrada);
+    return EXIT_FAILURE;
+  }
+
+  /*
+   * PROXIMO PASSO (proximo commit pequeno):
+   * Aplicar essa mesma checagem de NULL nas funcoes auxiliares:
+   * - inicializar_centroides() -> `escolhidos`
+   * - atualizar_centroides()   -> `soma_x`, `soma_y`, `count`
+   * - descobrir_k_ideal()      -> `wcss_valores`, `temp_centroides`
+   * Como essas funcoes hoje retornam `void` ou `int` de contagem, o ideal e
+   * decidir se elas encerram com `exit(EXIT_FAILURE)` ou passam a retornar erro.
+   */
   for (int i = 0; i < num_pontos; i++)
   {
     contagem_clusters[pontos[i].cluster_id]++;
