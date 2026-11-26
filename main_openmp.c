@@ -144,7 +144,7 @@ double calcular_wcss(Centroide *centroides, int num_clusters, Ponto *pontos, int
   return wcss;
 }
 
-int executar_kmeans(Centroide *centroides, int num_clusters, Ponto *pontos, int num_pontos, int max_iteracoes)
+int executar_kmeans(Centroide *centroides, int num_clusters, Ponto *pontos, int num_pontos, int *qnt_clusters, int max_iteracoes)
 {
   for (int i = 0; i < num_pontos; i++)
   {
@@ -155,13 +155,13 @@ int executar_kmeans(Centroide *centroides, int num_clusters, Ponto *pontos, int 
 
   double *soma_x = calloc(num_clusters, sizeof(double));
   double *soma_y = calloc(num_clusters, sizeof(double));
-  int *count = calloc(num_clusters, sizeof(int));
 
-  #pragma omp target enter data map(alloc: soma_x[0:num_clusters], soma_y[0:num_clusters], count[0:num_clusters])
+  #pragma omp target enter data \
+    map(alloc: soma_x[0:num_clusters], soma_y[0:num_clusters])
 
   int iteracao;
   #pragma omp target data \
-    map(tofrom: pontos[0:num_pontos], centroides[0:num_clusters])
+    map(tofrom: pontos[0:num_pontos], centroides[0:num_clusters], qnt_clusters[0:num_clusters])
   {
     for (iteracao = 0; iteracao < max_iteracoes; iteracao++)
     {
@@ -170,7 +170,7 @@ int executar_kmeans(Centroide *centroides, int num_clusters, Ponto *pontos, int 
       {
         soma_x[j] = 0.0;
         soma_y[j] = 0.0;
-        count[j] = 0;
+        qnt_clusters[j] = 0;
       }
 
       int mudancas = calcular_distancia_e_atribuir_clusters(
@@ -180,7 +180,7 @@ int executar_kmeans(Centroide *centroides, int num_clusters, Ponto *pontos, int 
           num_pontos,
           soma_x,
           soma_y,
-          count
+          qnt_clusters
         );
       if (mudancas == 0)
       {
@@ -189,17 +189,16 @@ int executar_kmeans(Centroide *centroides, int num_clusters, Ponto *pontos, int 
     }
   }
 
-  #pragma omp target exit data map(delete: soma_x[0:num_clusters], soma_y[0:num_clusters], count[0:num_clusters])
+  #pragma omp target exit data map(delete: soma_x[0:num_clusters], soma_y[0:num_clusters])
 
   free(soma_x);
   free(soma_y);
-  free(count);
 
   return iteracao;
 }
 
 // Executa o Método do Cotovelo e retorna o k ideal pela maior distância perpendicular à reta
-int descobrir_k_ideal(Ponto *pontos, int num_pontos, int k_max, int max_iteracoes)
+int descobrir_k_ideal(Ponto *pontos, int num_pontos, int *qnt_clusters, int k_max, int max_iteracoes)
 {
   if (k_max > num_pontos)
   {
@@ -220,7 +219,7 @@ int descobrir_k_ideal(Ponto *pontos, int num_pontos, int k_max, int max_iteracoe
   for (int k = 1; k <= k_max; k++)
   {
     Centroide *temp_centroides = malloc(k * sizeof(Centroide));
-    int iters = executar_kmeans(temp_centroides, k, pontos, num_pontos, max_iteracoes);
+    int iters = executar_kmeans(temp_centroides, k, pontos, num_pontos, qnt_clusters, max_iteracoes);
     wcss_valores[k] = calcular_wcss(temp_centroides, k, pontos, num_pontos);
 
     if (k == 1)
@@ -276,7 +275,7 @@ int descobrir_k_ideal(Ponto *pontos, int num_pontos, int k_max, int max_iteracoe
   return k_ideal;
 }
 
-int leitura_entradas(int argc, char *argv[], int *num_clusters, Ponto **pontos, int *num_pontos, char **linha, FILE **arquivo)
+int leitura_entradas(int argc, char *argv[], int *num_clusters, Ponto **pontos, int *num_pontos, int **qnt_clusters, char **linha, FILE **arquivo)
 {
   srand(time(NULL));
 
@@ -444,7 +443,20 @@ int leitura_entradas(int argc, char *argv[], int *num_clusters, Ponto **pontos, 
   // Se o número de clusters não foi informado (argc == 4), descobre via WCSS
   if (argc == 4)
   {
-    *num_clusters = descobrir_k_ideal(*pontos, *num_pontos, 8, 100);
+    const int k_max = 8;
+    *qnt_clusters = calloc(k_max, sizeof(int));
+    if (*qnt_clusters == NULL)
+    {
+      printf("Erro: Falha ao alocar memoria para a contagem de clusters.\n");
+      free(*linha);
+      *linha = NULL;
+      free(*pontos);
+      *pontos = NULL;
+      fclose(*arquivo);
+      *arquivo = NULL;
+      return 0;
+    }
+    *num_clusters = descobrir_k_ideal(*pontos, *num_pontos, *qnt_clusters, k_max, 100);
   }
   else if (*num_pontos < *num_clusters)
   {
@@ -458,6 +470,21 @@ int leitura_entradas(int argc, char *argv[], int *num_clusters, Ponto **pontos, 
     *arquivo = NULL;
     return 0;
   }
+  else
+  {
+    *qnt_clusters = calloc(*num_clusters, sizeof(int));
+    if (*qnt_clusters == NULL)
+    {
+      printf("Erro: Falha ao alocar memoria para a contagem de clusters.\n");
+      free(*linha);
+      *linha = NULL;
+      free(*pontos);
+      *pontos = NULL;
+      fclose(*arquivo);
+      *arquivo = NULL;
+      return 0;
+    }
+  }
 
   return 1;
 }
@@ -469,8 +496,9 @@ int main(int argc, char *argv[])
   Ponto *pontos = NULL;
   char *linha = NULL;
   FILE *arquivo = NULL;
+  int *contagem_clusters = NULL;
 
-  if (!leitura_entradas(argc, argv, &num_clusters, &pontos, &num_pontos, &linha, &arquivo))
+  if (!leitura_entradas(argc, argv, &num_clusters, &pontos, &num_pontos, &contagem_clusters, &linha, &arquivo))
   {
     return EXIT_FAILURE;
   }
@@ -487,19 +515,8 @@ int main(int argc, char *argv[])
 
   // Executa o K-means definitivo
   clock_t inicio_kmeans = clock();
-
-  int iteracoes_finais = executar_kmeans(centroides, num_clusters, pontos, num_pontos, 100);
+  int iteracoes_finais = executar_kmeans(centroides, num_clusters, pontos, num_pontos, contagem_clusters, 100);
   double tempo_kmeans = (double)(clock() - inicio_kmeans) / CLOCKS_PER_SEC;
-
-  int *contagem_clusters = calloc(num_clusters, sizeof(int));
-  for (int i = 0; i < num_pontos; i++)
-  {
-    int id = pontos[i].cluster_id;
-    if (id >= 0 && id < num_clusters)
-    {
-      contagem_clusters[id]++;
-    }
-  }
 
   printf("=== RESULTADO FINAL (k = %d) ===\n", num_clusters);
   printf("[LOG] Convergiu em %d iteracoes (%.3fs)\n\n", iteracoes_finais, tempo_kmeans);
